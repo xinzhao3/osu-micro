@@ -15,10 +15,12 @@ int main(int argc, char *argv[])
     int i, numprocs, rank, size;
     double latency = 0.0, t_start = 0.0, t_stop = 0.0;
     double timer=0.0;
-    double avg_time = 0.0, max_time = 0.0, min_time = 0.0;
     float *sendbuf, *recvbuf;
     int po_ret;
     size_t bufsize;
+    MPI_Comm sub_comm;
+    int sub_rank, sub_numprocs, size_loop = 0, k = 0;
+    double *avg_time_stats, *min_time_stats, *max_time_stats;
 
     set_header(HEADER);
     set_benchmark_name("osu_allreduce");
@@ -85,7 +87,27 @@ int main(int argc, char *argv[])
     }
     set_buffer(recvbuf, options.accel, 0, bufsize);
 
-    print_preamble(rank);
+    /* create sub communicator */
+    if (options.num_comms == 1) {
+        sub_comm = MPI_COMM_WORLD;
+    }
+    else {
+        MPI_Comm_split(MPI_COMM_WORLD, rank % options.num_comms, rank, &sub_comm);
+    }
+
+    MPI_Comm_rank(sub_comm, &sub_rank);
+    MPI_Comm_size(sub_comm, &sub_numprocs);
+
+    if (sub_rank == 0) {
+        /* count how many size loop */
+        for(size=options.min_message_size; size*sizeof(float) <= options.max_message_size; size *= 2) {
+            size_loop++;
+        }
+
+        avg_time_stats = (double *)malloc(sizeof(double) * size_loop);
+        min_time_stats = (double *)malloc(sizeof(double) * size_loop);
+        max_time_stats = (double *)malloc(sizeof(double) * size_loop);
+    }
 
     for(size=options.min_message_size; size*sizeof(float) <= options.max_message_size; size *= 2) {
 
@@ -99,30 +121,67 @@ int main(int argc, char *argv[])
         timer=0.0;
         for(i=0; i < options.iterations + options.skip ; i++) {
             t_start = MPI_Wtime();
-            MPI_Allreduce(sendbuf, recvbuf, size, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD );
+            MPI_Allreduce(sendbuf, recvbuf, size, MPI_FLOAT, MPI_SUM, sub_comm );
             t_stop=MPI_Wtime();
             if(i>=options.skip){
 
             timer+=t_stop-t_start;
             }
-            MPI_Barrier(MPI_COMM_WORLD);
+            MPI_Barrier(sub_comm);
         }
         latency = (double)(timer * 1e6) / options.iterations;
 
-        MPI_Reduce(&latency, &min_time, 1, MPI_DOUBLE, MPI_MIN, 0,
-                MPI_COMM_WORLD);
-        MPI_Reduce(&latency, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0,
-                MPI_COMM_WORLD);
-        MPI_Reduce(&latency, &avg_time, 1, MPI_DOUBLE, MPI_SUM, 0,
-                MPI_COMM_WORLD);
-        avg_time = avg_time/numprocs;
+        if (sub_rank == 0) {
+            MPI_Reduce(&latency, &min_time_stats[k], 1, MPI_DOUBLE, MPI_MIN, 0,
+                       sub_comm);
+            MPI_Reduce(&latency, &max_time_stats[k], 1, MPI_DOUBLE, MPI_MAX, 0,
+                       sub_comm);
+            MPI_Reduce(&latency, &avg_time_stats[k], 1, MPI_DOUBLE, MPI_SUM, 0,
+                       sub_comm);
+            avg_time_stats[k] = avg_time_stats[k]/sub_numprocs;
 
-        print_stats(rank, size * sizeof(float), avg_time, min_time, max_time);
+            k++;
+        }
+        else {
+            MPI_Reduce(&latency, NULL, 1, MPI_DOUBLE, MPI_MIN, 0,
+                       sub_comm);
+            MPI_Reduce(&latency, NULL, 1, MPI_DOUBLE, MPI_MAX, 0,
+                       sub_comm);
+            MPI_Reduce(&latency, NULL, 1, MPI_DOUBLE, MPI_SUM, 0,
+                       sub_comm);
+        }
+
         MPI_Barrier(MPI_COMM_WORLD);
     }
 
     free_buffer(sendbuf, options.accel);
     free_buffer(recvbuf, options.accel);
+
+    for (i = 0; i < numprocs; i++) {
+        if (i == rank && sub_rank == 0) {
+            print_preamble(sub_rank);
+            printf("### Group ID: %d ###\n", rank % options.num_comms);
+
+            k = 0;
+            for (size=options.min_message_size; size*sizeof(float) <= options.max_message_size; size *= 2) {
+                print_stats(sub_rank, size * sizeof(float),
+                            avg_time_stats[k], min_time_stats[k], max_time_stats[k]);
+                k++;
+            }
+            printf("\n");
+        }
+    }
+
+    if (sub_rank == 0) {
+        free(avg_time_stats);
+        free(min_time_stats);
+        free(max_time_stats);
+    }
+
+    /* free sub communicator */
+    if (options.num_comms != 1) {
+        MPI_Comm_free(&sub_comm);
+    }
 
     MPI_Finalize();
 

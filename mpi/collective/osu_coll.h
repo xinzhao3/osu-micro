@@ -78,6 +78,9 @@
 #   define FLOAT_PRECISION 2
 #endif
 
+#   define MIN_NUM_COMMS 1
+#   define MAX_NUM_COMMS 16
+
 static int iterations = 1000;
 static int iterations_large = 100;
 static int print_size = 0;
@@ -252,6 +255,7 @@ struct options_t {
     size_t skip_large;
     int num_probes;
     int device_array_size;
+    int num_comms;
 };
 
 extern struct options_t options;
